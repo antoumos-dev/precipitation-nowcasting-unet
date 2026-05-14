@@ -36,14 +36,14 @@ print(f"Weighting exponent: {WEIGHT_EXPONENT}")
 # LOAD DATA
 # ============================================================
 print("\nLoading data...")
-data  = np.load(DATA_DIR / "phase2_samples.npz")
+data  = np.load(DATA_DIR / "training_data.npz")
 X_all = np.log1p(data["X"]).astype(np.float32)
 Y_all = np.log1p(data["Y"]).astype(np.float32)
 print(f"X_all: {X_all.shape}")
 print(f"Y_all: {Y_all.shape}")
 
 # Load enriched metadata with split column
-meta = pd.read_csv(DATA_DIR / "phase2_samples_meta_enriched.csv")
+meta = pd.read_csv(DATA_DIR / "training_samples_meta_enriched.csv")
 print(f"Meta: {meta.shape}")
 print(meta["split"].value_counts())
 
