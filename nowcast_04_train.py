@@ -30,7 +30,7 @@ print(f"Batch size: {BATCH_SIZE}")
 print(f"Epochs:     {NUM_EPOCHS}")
 print(f"LR:         {LR}")
 
-
+print(f"Weighting exponent: {WEIGHT_EXPONENT}")
 
 # ============================================================
 # LOAD DATA
