@@ -1,6 +1,6 @@
 # Precipitation Nowcasting with U-Net
 
-Short-term precipitation forecasting with deep learning — 30-minute radar extrapolation for Switzerland, trained on MeteoSwiss radar composites
+Short-term precipitation forecasting with deep learning — 30-minute radar extrapolation for Switzerland, trained on MeteoSwiss radar composites across a 3.5-year dataset over the period 2020–2023.
 
 
 ---
