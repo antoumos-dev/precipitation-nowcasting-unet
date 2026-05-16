@@ -1,13 +1,12 @@
 # Precipitation Nowcasting with U-Net
 
-Short-term precipitation forecasting with deep learning — 30-minute radar extrapolation for Switzerland, trained on MeteoSwiss radar composites across a 3.5-year dataset over the period 2020–2023.
-
+Short-term precipitation forecasting with deep learning — 10/20/30-minute radar extrapolation for Switzerland, trained on MeteoSwiss radar composites across a 3.5-year dataset over the period 2020–2023.
 
 ---
 
 ## Problem
 
-Predicting where and how much it will rain 30 minutes ahead is a core challenge in operational meteorology. Classical optical-flow methods (e.g. pysteps) extrapolate current patterns but struggle with convective initiation and decay. This project trains a U-Net to learn the mapping directly from recent radar frames to a future frame.
+Predicting where and how much it will rain 10–30 minutes ahead is a core challenge in operational meteorology. Classical optical-flow methods (e.g. pysteps) extrapolate current patterns but struggle with convective initiation and decay. This project trains a U-Net to learn the mapping directly from recent radar frames to multiple future frames simultaneously.
 
 Convolutional architectures are well-suited for this task because radar composites are inherently spatial: precipitation patterns have local structure and translational regularity that convolutions can exploit efficiently. The U-Net combines an encoder branch — which progressively reduces spatial resolution while increasing feature depth to capture large-scale patterns — with a decoder branch that restores spatial resolution using skip connections from the encoder.
 
@@ -17,9 +16,9 @@ Convolutional architectures are well-suited for this task because radar composit
 
 | Component | Choice |
 |---|---|
-| Architecture | U-Net (encoder–decoder with skip connections) |
+| Architecture | Multi-output U-Net — shared encoder, three parallel decoder branches (+10, +20, +30 min) |
 | Input | 3 radar frames (log1p-scaled reflectivity), 501×371 px |
-| Output | 1 predicted frame at +30 min |
+| Output | 3 predicted frames at +10, +20, +30 min |
 | Loss | Weighted L1 — upweights high-intensity pixels to counter class imbalance |
 | Optimizer | AdamW, lr=1e-4, weight decay=1e-4 |
 | Regularisation | BatchNorm + Dropout2d (0.1) + early stopping (patience=10) |

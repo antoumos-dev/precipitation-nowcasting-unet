@@ -21,9 +21,10 @@ BATCH_SIZE      = 8
 NUM_EPOCHS      = 50
 LR              = 1e-4
 NUM_WORKERS     = 4
-WEIGHT_EXPONENT = 1   # >1 = more focus on heavy rain, <1 = less
+WEIGHT_EXPONENT  = 1    # >1 = more focus on heavy rain, <1 = less
+SPECTRAL_WEIGHT  = 0.1  # λ for spectral loss term
 DEVICE      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-RUN_NAME    = "wl1_linear"    # change per run, e.g. "mse_baseline", "wmse_linear", "wl1_linear"
+RUN_NAME    = "unet2_gradient_l1"  # other choices: unet2_weighted_l1, unet2_spectral_l1
 
 print(f"Device:     {DEVICE}")
 print(f"Batch size: {BATCH_SIZE}")
@@ -141,46 +142,84 @@ class DecoderBlock(nn.Module):
         x = torch.cat([x, skip], dim=1)
         return self.conv(x)
 
-class UNet(nn.Module):
-    def __init__(self, in_channels=3, out_channels=1, features=[64, 128, 256, 512]):
+class MultiOutputUNet(nn.Module):
+    """
+    Shared encoder + three parallel decoder branches for +10, +20, +30 min.
+    Cross-connections inject +10 dec4 features into the +20 decoder and
+    +20 dec4 features into the +30 decoder at 64x48 resolution to enforce
+    temporal consistency at the mesoscale.
+    """
+    def __init__(self, in_channels=3, features=[32, 64, 128, 256]):
         super().__init__()
-        self.enc1       = EncoderBlock(in_channels, features[0])
-        self.enc2       = EncoderBlock(features[0], features[1])
-        self.enc3       = EncoderBlock(features[1], features[2])
-        self.enc4       = EncoderBlock(features[2], features[3])
-        self.bottleneck = DoubleConv(features[3], features[3] * 2)
-        self.dec4       = DecoderBlock(features[3] * 2, features[3])
-        self.dec3       = DecoderBlock(features[3], features[2])
-        self.dec2       = DecoderBlock(features[2], features[1])
-        self.dec1       = DecoderBlock(features[1], features[0])
-        self.final      = nn.Conv2d(features[0], out_channels, 1)
+        f = features
+
+        # Shared encoder
+        self.enc1       = EncoderBlock(in_channels, f[0])
+        self.enc2       = EncoderBlock(f[0],        f[1])
+        self.enc3       = EncoderBlock(f[1],        f[2])
+        self.enc4       = EncoderBlock(f[2],        f[3])
+        self.bottleneck = DoubleConv(f[3], f[3] * 2)
+
+        # Three decoder branches
+        for sfx in ('_10', '_20', '_30'):
+            setattr(self, f'dec4{sfx}', DecoderBlock(f[3] * 2, f[3]))
+            setattr(self, f'dec3{sfx}', DecoderBlock(f[3],     f[2]))
+            setattr(self, f'dec2{sfx}', DecoderBlock(f[2],     f[1]))
+            setattr(self, f'dec1{sfx}', DecoderBlock(f[1],     f[0]))
+            setattr(self, f'final{sfx}', nn.Conv2d(f[0], 1, 1))
+
+        # Cross-connections at 64×48 (dec4 output): 1×1 conv, channel-preserving
+        self.cross_10_to_20 = nn.Conv2d(f[3], f[3], 1)
+        self.cross_20_to_30 = nn.Conv2d(f[3], f[3], 1)
+
+    def _decode(self, sfx, b, s1, s2, s3, s4, inject=None):
+        d4 = getattr(self, f'dec4{sfx}')(b, s4)
+        if inject is not None:
+            d4 = d4 + inject
+        d3 = getattr(self, f'dec3{sfx}')(d4, s3)
+        d2 = getattr(self, f'dec2{sfx}')(d3, s2)
+        d1 = getattr(self, f'dec1{sfx}')(d2, s1)
+        return getattr(self, f'final{sfx}')(d1), d4
 
     def forward(self, x):
         x, s1 = self.enc1(x)
         x, s2 = self.enc2(x)
         x, s3 = self.enc3(x)
         x, s4 = self.enc4(x)
-        x = self.bottleneck(x)
-        x = self.dec4(x, s4)
-        x = self.dec3(x, s3)
-        x = self.dec2(x, s2)
-        x = self.dec1(x, s1)
-        x = self.final(x)
-        x = F.relu(x)                  # non-negative predictions
-        return x[:, :, 5:506, 6:377]  # crop back to (501, 371)
+        b     = self.bottleneck(x)
+
+        out10, d4_10 = self._decode('_10', b, s1, s2, s3, s4)
+        out20, d4_20 = self._decode('_20', b, s1, s2, s3, s4,
+                                    inject=self.cross_10_to_20(d4_10))
+        out30, _     = self._decode('_30', b, s1, s2, s3, s4,
+                                    inject=self.cross_20_to_30(d4_20))
+
+        out = F.relu(torch.cat([out10, out20, out30], dim=1))  # (B, 3, H, W)
+        return out[:, :, 5:506, 6:377]  # crop back to (501, 371)
 
 def weighted_mse(pred, target):
     w = (1.0 + torch.expm1(target)) ** WEIGHT_EXPONENT
     return (w * (pred - target) ** 2).mean()
 
 def weighted_l1(pred, target):
-    # L1 penalises residuals linearly → less regression-to-mean → sharper predictions
     w = (1.0 + torch.expm1(target)) ** WEIGHT_EXPONENT
     return (w * torch.abs(pred - target)).mean()
 
-LOSS_FN = weighted_l1   # swap to weighted_mse to revert
+def gradient_loss(pred, target):
+    # Penalise differences in spatial gradients — discourages blurry predictions
+    # without requiring FFT (more compatible across CUDA versions)
+    pred_dx  = pred[:, :, :, 1:]  - pred[:, :, :, :-1]
+    pred_dy  = pred[:, :, 1:, :]  - pred[:, :, :-1, :]
+    target_dx = target[:, :, :, 1:]  - target[:, :, :, :-1]
+    target_dy = target[:, :, 1:, :]  - target[:, :, :-1, :]
+    return F.l1_loss(pred_dx, target_dx) + F.l1_loss(pred_dy, target_dy)
 
-model     = UNet(features=[32, 64, 128, 256]).to(DEVICE)
+def combined_loss(pred, target):
+    return weighted_l1(pred, target) + SPECTRAL_WEIGHT * gradient_loss(pred, target)
+
+LOSS_FN = combined_loss
+
+model     = MultiOutputUNet(features=[32, 64, 128, 256]).to(DEVICE)
 optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
 
 print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -212,7 +251,7 @@ for epoch in range(1, NUM_EPOCHS + 1):
 
     for x_b, y_b in train_loader:
         x_b = x_b.to(DEVICE)
-        y_b = y_b.to(DEVICE)  # already (8, 1, 501, 371)
+        y_b = y_b.to(DEVICE)  # (B, 3, 501, 371) — +10, +20, +30 min
 
         optimizer.zero_grad()
         pred = model(x_b)
