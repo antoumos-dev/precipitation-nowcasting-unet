@@ -16,7 +16,7 @@ DATA_DIR  = _HERE / "radar_data"
 CKPT_DIR  = _HERE / "checkpoints"
 OUT_DIR   = _HERE / "test_output"
 
-RUN_NAME   = "wl1_spectral"    # must match training run
+RUN_NAME   = "unet2_weighted_l1"    # must match training run
 BATCH_SIZE = 8
 DEVICE     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 PAD        = (6, 7, 5, 6)
@@ -61,33 +61,46 @@ class DecoderBlock(nn.Module):
         x = torch.cat([x, skip], dim=1)
         return self.conv(x)
 
-class UNet(nn.Module):
-    def __init__(self, in_channels=3, out_channels=1, features=[32, 64, 128, 256]):
+class MultiOutputUNet(nn.Module):
+    def __init__(self, in_channels=3, features=[32, 64, 128, 256]):
         super().__init__()
-        self.enc1       = EncoderBlock(in_channels, features[0])
-        self.enc2       = EncoderBlock(features[0], features[1])
-        self.enc3       = EncoderBlock(features[1], features[2])
-        self.enc4       = EncoderBlock(features[2], features[3])
-        self.bottleneck = DoubleConv(features[3], features[3] * 2)
-        self.dec4       = DecoderBlock(features[3] * 2, features[3])
-        self.dec3       = DecoderBlock(features[3], features[2])
-        self.dec2       = DecoderBlock(features[2], features[1])
-        self.dec1       = DecoderBlock(features[1], features[0])
-        self.final      = nn.Conv2d(features[0], out_channels, 1)
+        f = features
+        self.enc1       = EncoderBlock(in_channels, f[0])
+        self.enc2       = EncoderBlock(f[0],        f[1])
+        self.enc3       = EncoderBlock(f[1],        f[2])
+        self.enc4       = EncoderBlock(f[2],        f[3])
+        self.bottleneck = DoubleConv(f[3], f[3] * 2)
+        for sfx in ('_10', '_20', '_30'):
+            setattr(self, f'dec4{sfx}', DecoderBlock(f[3] * 2, f[3]))
+            setattr(self, f'dec3{sfx}', DecoderBlock(f[3],     f[2]))
+            setattr(self, f'dec2{sfx}', DecoderBlock(f[2],     f[1]))
+            setattr(self, f'dec1{sfx}', DecoderBlock(f[1],     f[0]))
+            setattr(self, f'final{sfx}', nn.Conv2d(f[0], 1, 1))
+        self.cross_10_to_20 = nn.Conv2d(f[3], f[3], 1)
+        self.cross_20_to_30 = nn.Conv2d(f[3], f[3], 1)
+
+    def _decode(self, sfx, b, s1, s2, s3, s4, inject=None):
+        d4 = getattr(self, f'dec4{sfx}')(b, s4)
+        if inject is not None:
+            d4 = d4 + inject
+        d3 = getattr(self, f'dec3{sfx}')(d4, s3)
+        d2 = getattr(self, f'dec2{sfx}')(d3, s2)
+        d1 = getattr(self, f'dec1{sfx}')(d2, s1)
+        return getattr(self, f'final{sfx}')(d1), d4
 
     def forward(self, x):
         x, s1 = self.enc1(x)
         x, s2 = self.enc2(x)
         x, s3 = self.enc3(x)
         x, s4 = self.enc4(x)
-        x = self.bottleneck(x)
-        x = self.dec4(x, s4)
-        x = self.dec3(x, s3)
-        x = self.dec2(x, s2)
-        x = self.dec1(x, s1)
-        x = self.final(x)
-        x = F.relu(x)
-        return x[:, :, 5:506, 6:377]
+        b     = self.bottleneck(x)
+        out10, d4_10 = self._decode('_10', b, s1, s2, s3, s4)
+        out20, d4_20 = self._decode('_20', b, s1, s2, s3, s4,
+                                    inject=self.cross_10_to_20(d4_10))
+        out30, _     = self._decode('_30', b, s1, s2, s3, s4,
+                                    inject=self.cross_20_to_30(d4_20))
+        out = F.relu(torch.cat([out10, out20, out30], dim=1))
+        return out[:, :, 5:506, 6:377]
 
 # ============================================================
 # LOAD DATA (test split)
@@ -115,7 +128,7 @@ loader = DataLoader(TensorDataset(X_test_pad, Y_test_t),
 # ============================================================
 # LOAD MODEL
 # ============================================================
-model = UNet().to(DEVICE)
+model = MultiOutputUNet(features=[32, 64, 128, 256]).to(DEVICE)
 ckpt  = torch.load(CKPT_DIR / f"best_model_{RUN_NAME}.pt", map_location=DEVICE, weights_only=True)
 model.load_state_dict(ckpt["model_state"])
 model.eval()
@@ -132,15 +145,17 @@ with torch.no_grad():
         preds_log.append(pred)
         trues_log.append(y_b)
 
-preds_log = torch.cat(preds_log).numpy()   # (N, 1, 501, 371)
+preds_log = torch.cat(preds_log).numpy()   # (N, 3, 501, 371)
 trues_log = torch.cat(trues_log).numpy()
 
 # Convert to mm/10min
 preds_mmh = np.expm1(preds_log)
 trues_mmh = np.expm1(trues_log)
 
-# Persistence baseline: last input frame (channel index 2) as the +30min prediction
-persist_mmh = np.expm1(X_test[:, 2:3, :, :])
+# Persistence baseline: last input frame (t0), same for all lead times
+persist_mmh = np.expm1(X_test[:, 2:3, :, :])  # (N, 1, 501, 371)
+
+LEAD_NAMES = ["+10min", "+20min", "+30min"]
 
 # ============================================================
 # METRICS
@@ -154,26 +169,6 @@ def compute_csi(pred, obs, thresholds):
         results[thr] = tp / (tp + fp + fn) if (tp + fp + fn) > 0 else float("nan")
     return results
 
-thresholds  = [0.1, 0.2, 0.5, 1.0]
-
-mae_model   = np.mean(np.abs(preds_mmh   - trues_mmh))
-rmse_model  = np.sqrt(np.mean((preds_mmh   - trues_mmh) ** 2))
-mae_pers    = np.mean(np.abs(persist_mmh - trues_mmh))
-rmse_pers   = np.sqrt(np.mean((persist_mmh - trues_mmh) ** 2))
-
-csi_model   = compute_csi(preds_mmh,   trues_mmh, thresholds)
-csi_pers    = compute_csi(persist_mmh, trues_mmh, thresholds)
-
-print(f"\n{'Metric':<28} {'U-Net':>8} {'Persist':>8}")
-print("-" * 46)
-print(f"{'MAE  (mm/10min)':<28} {mae_model:>8.3f} {mae_pers:>8.3f}")
-print(f"{'RMSE (mm/10min)':<28} {rmse_model:>8.3f} {rmse_pers:>8.3f}")
-for thr in thresholds:
-    print(f"{'CSI @' + str(thr) + 'mm/10min':<28} {csi_model[thr]:>8.3f} {csi_pers[thr]:>8.3f}")
-
-# ============================================================
-# FSS (Fractions Skill Score)
-# ============================================================
 def fss_score(pred, obs, threshold, scale_px):
     pred_bin  = (pred >= threshold).astype(np.float32)
     obs_bin   = (obs  >= threshold).astype(np.float32)
@@ -184,60 +179,72 @@ def fss_score(pred, obs, threshold, scale_px):
     fbs_worst = np.mean(pred_frac ** 2) + np.mean(obs_frac ** 2)
     return 1.0 - fbs / fbs_worst if fbs_worst > 0 else float("nan")
 
-FSS_THRESHOLDS = [0.1, 0.5, 1.0]   # mm/10min
-FSS_SCALES_PX  = [8, 32]            # neighbourhood radii in pixels
+thresholds     = [0.1, 0.2, 0.5, 1.0]
+FSS_THRESHOLDS = [0.1, 0.5, 1.0]
+FSS_SCALES_PX  = [8, 32]
 
-fss_model = {thr: {} for thr in FSS_THRESHOLDS}
-fss_pers  = {thr: {} for thr in FSS_THRESHOLDS}
-for thr in FSS_THRESHOLDS:
-    for s in FSS_SCALES_PX:
-        fss_model[thr][s] = np.nanmean([
-            fss_score(preds_mmh[i, 0],   trues_mmh[i, 0], thr, s)
-            for i in range(len(preds_mmh))
-        ])
-        fss_pers[thr][s] = np.nanmean([
-            fss_score(persist_mmh[i, 0], trues_mmh[i, 0], thr, s)
-            for i in range(len(persist_mmh))
-        ])
+rows = []
+for j, lead in enumerate(LEAD_NAMES):
+    pred_j    = preds_mmh[:, j:j+1, :, :]
+    true_j    = trues_mmh[:, j:j+1, :, :]
 
-print("\nFSS:")
-print(f"  {'Metric':<32} {'U-Net':>8} {'Persist':>8}")
-print("  " + "-" * 50)
-for thr in FSS_THRESHOLDS:
-    for s in FSS_SCALES_PX:
-        label = f"FSS @{thr}mm/10min scale={s}px"
-        print(f"  {label:<32} {fss_model[thr][s]:>8.3f} {fss_pers[thr][s]:>8.3f}")
+    mae_model  = float(np.mean(np.abs(pred_j   - true_j)))
+    rmse_model = float(np.sqrt(np.mean((pred_j - true_j) ** 2)))
+    mae_pers   = float(np.mean(np.abs(persist_mmh - true_j)))
+    rmse_pers  = float(np.sqrt(np.mean((persist_mmh - true_j) ** 2)))
 
-rows = (
-    [{"run": RUN_NAME,      "metric": "mae",  "threshold_mm": None, "scale_px": None, "value": round(mae_model,  3)},
-     {"run": RUN_NAME,      "metric": "rmse", "threshold_mm": None, "scale_px": None, "value": round(rmse_model, 3)},
-     {"run": "persistence", "metric": "mae",  "threshold_mm": None, "scale_px": None, "value": round(mae_pers,   3)},
-     {"run": "persistence", "metric": "rmse", "threshold_mm": None, "scale_px": None, "value": round(rmse_pers,  3)}]
-  + [{"run": RUN_NAME,      "metric": "csi", "threshold_mm": thr, "scale_px": None, "value": round(csi_model[thr], 3)}
-     for thr in [0.1, 0.5, 1.0]]
-  + [{"run": "persistence", "metric": "csi", "threshold_mm": thr, "scale_px": None, "value": round(csi_pers[thr],  3)}
-     for thr in [0.1, 0.5, 1.0]]
-  + [{"run": RUN_NAME,      "metric": "fss", "threshold_mm": thr, "scale_px": s, "value": round(fss_model[thr][s], 3)}
-     for thr in FSS_THRESHOLDS for s in FSS_SCALES_PX]
-  + [{"run": "persistence", "metric": "fss", "threshold_mm": thr, "scale_px": s, "value": round(fss_pers[thr][s],  3)}
-     for thr in FSS_THRESHOLDS for s in FSS_SCALES_PX]
-)
+    csi_model = compute_csi(pred_j,       true_j, thresholds)
+    csi_pers  = compute_csi(persist_mmh,  true_j, thresholds)
+
+    print(f"\n--- Lead {lead} ---")
+    print(f"  {'Metric':<28} {'U-Net':>8} {'Persist':>8}")
+    print("  " + "-" * 46)
+    print(f"  {'MAE  (mm/10min)':<28} {mae_model:>8.3f} {mae_pers:>8.3f}")
+    print(f"  {'RMSE (mm/10min)':<28} {rmse_model:>8.3f} {rmse_pers:>8.3f}")
+    for thr in thresholds:
+        print(f"  {'CSI @' + str(thr) + 'mm/10min':<28} {csi_model[thr]:>8.3f} {csi_pers[thr]:>8.3f}")
+
+    for thr in FSS_THRESHOLDS:
+        for s in FSS_SCALES_PX:
+            fss_m = np.nanmean([fss_score(pred_j[i, 0],      true_j[i, 0],      thr, s) for i in range(len(pred_j))])
+            fss_p = np.nanmean([fss_score(persist_mmh[i, 0], true_j[i, 0], thr, s) for i in range(len(pred_j))])
+            print(f"  {'FSS @' + str(thr) + 'mm scale=' + str(s) + 'px':<28} {fss_m:>8.3f} {fss_p:>8.3f}")
+            rows += [
+                {"run": RUN_NAME,      "lead": lead, "metric": "fss", "threshold_mm": thr, "scale_px": s, "value": round(fss_m, 3)},
+                {"run": "persistence", "lead": lead, "metric": "fss", "threshold_mm": thr, "scale_px": s, "value": round(fss_p, 3)},
+            ]
+
+    rows += [
+        {"run": RUN_NAME,      "lead": lead, "metric": "mae",  "threshold_mm": None, "scale_px": None, "value": round(mae_model,  3)},
+        {"run": RUN_NAME,      "lead": lead, "metric": "rmse", "threshold_mm": None, "scale_px": None, "value": round(rmse_model, 3)},
+        {"run": "persistence", "lead": lead, "metric": "mae",  "threshold_mm": None, "scale_px": None, "value": round(mae_pers,   3)},
+        {"run": "persistence", "lead": lead, "metric": "rmse", "threshold_mm": None, "scale_px": None, "value": round(rmse_pers,  3)},
+    ] + [
+        {"run": RUN_NAME,      "lead": lead, "metric": "csi", "threshold_mm": thr, "scale_px": None, "value": round(csi_model[thr], 3)}
+        for thr in [0.1, 0.5, 1.0]
+    ] + [
+        {"run": "persistence", "lead": lead, "metric": "csi", "threshold_mm": thr, "scale_px": None, "value": round(csi_pers[thr],  3)}
+        for thr in [0.1, 0.5, 1.0]
+    ]
+
 pd.DataFrame(rows).to_csv(RUN_OUT_DIR / f"metrics_{RUN_NAME}.csv", index=False)
 
 # ============================================================
-# PLOT: first 4 test cases
+# PLOT: first 4 test cases, all 3 lead times
 # ============================================================
 n_plot = min(4, len(preds_mmh))
 vmax   = np.percentile(trues_mmh[:n_plot], 99)
 
-fig, axes = plt.subplots(n_plot, 2, figsize=(8, 3 * n_plot), squeeze=False)
+fig, axes = plt.subplots(n_plot * 3, 2, figsize=(8, 3 * n_plot * 3), squeeze=False)
 for i in range(n_plot):
-    axes[i, 0].imshow(trues_mmh[i, 0], vmin=0, vmax=vmax, cmap="Blues")
-    axes[i, 0].set_title(f"Observed [{i}] (mm/10min)")
-    axes[i, 0].axis("off")
-    axes[i, 1].imshow(preds_mmh[i, 0], vmin=0, vmax=vmax, cmap="Blues")
-    axes[i, 1].set_title(f"Predicted [{i}] (mm/10min)")
-    axes[i, 1].axis("off")
+    for j, lead in enumerate(LEAD_NAMES):
+        row = i * 3 + j
+        axes[row, 0].imshow(trues_mmh[i, j], vmin=0, vmax=vmax, cmap="Blues")
+        axes[row, 0].set_title(f"Observed [{i}] {lead}")
+        axes[row, 0].axis("off")
+        axes[row, 1].imshow(preds_mmh[i, j], vmin=0, vmax=vmax, cmap="Blues")
+        axes[row, 1].set_title(f"Predicted [{i}] {lead}")
+        axes[row, 1].axis("off")
 
 plt.tight_layout()
 plt.savefig(RUN_OUT_DIR / f"test_cases_{RUN_NAME}.png", dpi=150)
@@ -268,25 +275,62 @@ def radial_power_spectrum(field):
     ])
     return k_mid, power
 
-# average spectra over all test samples
 k_ref, _ = radial_power_spectrum(trues_mmh[0, 0])
-psd_obs  = np.zeros_like(k_ref)
-psd_pred = np.zeros_like(k_ref)
-for i in range(len(trues_mmh)):
-    _, p_obs  = radial_power_spectrum(trues_mmh[i, 0])
-    _, p_pred = radial_power_spectrum(preds_mmh[i, 0])
-    psd_obs  += p_obs
-    psd_pred += p_pred
-psd_obs  /= len(trues_mmh)
-psd_pred /= len(preds_mmh)
+colors    = ["tab:blue", "tab:orange", "tab:green"]
 
-fig, ax = plt.subplots(figsize=(6, 4))
-ax.loglog(k_ref, psd_obs,  label="Observed")
-ax.loglog(k_ref, psd_pred, label="Predicted", linestyle="--")
+fig, ax = plt.subplots(figsize=(7, 5))
+for j, lead in enumerate(LEAD_NAMES):
+    psd_obs  = np.zeros_like(k_ref)
+    psd_pred = np.zeros_like(k_ref)
+    for i in range(len(trues_mmh)):
+        _, p_obs  = radial_power_spectrum(trues_mmh[i, j])
+        _, p_pred = radial_power_spectrum(preds_mmh[i, j])
+        psd_obs  += p_obs
+        psd_pred += p_pred
+    psd_obs  /= len(trues_mmh)
+    psd_pred /= len(preds_mmh)
+    ax.loglog(k_ref, psd_obs,  color=colors[j], linestyle="-",  label=f"Observed {lead}")
+    ax.loglog(k_ref, psd_pred, color=colors[j], linestyle="--", label=f"Predicted {lead}")
+
 ax.set_xlabel("Wavenumber (cycles / pixel)")
 ax.set_ylabel("Power spectral density")
 ax.set_title(f"Radial Power Spectrum — {RUN_NAME}")
-ax.legend()
+ax.legend(fontsize=8)
 plt.tight_layout()
 plt.savefig(RUN_OUT_DIR / f"power_spectrum_{RUN_NAME}.png", dpi=150)
 print(f"Power spectrum plot saved to {RUN_OUT_DIR / f'power_spectrum_{RUN_NAME}.png'}")
+
+# ============================================================
+# TEMPORAL AUTOCORRELATION
+# ============================================================
+def spatial_corr(a, b):
+    a, b = a.flatten(), b.flatten()
+    return float(np.corrcoef(a, b)[0, 1]) if a.std() > 1e-6 and b.std() > 1e-6 else float("nan")
+
+t0_mmh       = np.expm1(X_test[:, 2, :, :])
+lead_minutes = [10, 20, 30]
+N            = len(t0_mmh)
+
+corr = {
+    "Observed":    [np.nanmean([spatial_corr(t0_mmh[i], trues_mmh[i, j])   for i in range(N)]) for j in range(3)],
+    "Model":       [np.nanmean([spatial_corr(t0_mmh[i], preds_mmh[i, j])   for i in range(N)]) for j in range(3)],
+    "Persistence": [np.nanmean([spatial_corr(t0_mmh[i], persist_mmh[i, 0]) for i in range(N)]) for _ in range(3)],
+}
+
+print("\nTemporal Autocorrelation (corr with t0):")
+print(f"  {'Lead':<8}" + "".join(f"{k:>14}" for k in corr))
+print("  " + "-" * 50)
+for j, lt in enumerate(lead_minutes):
+    print(f"  {lt:>+4}min  " + "".join(f"{corr[k][j]:>14.4f}" for k in corr))
+
+styles = {"Observed": ("black", "o", "-"), "Model": ("tab:blue", "s", "--"), "Persistence": ("tab:orange", "^", ":")}
+fig, ax = plt.subplots(figsize=(6, 4))
+for label, (color, marker, ls) in styles.items():
+    ax.plot(lead_minutes, corr[label], marker=marker, color=color, linestyle=ls, label=label)
+ax.set(xlabel="Lead time (min)", ylabel="Spatial correlation with t0",
+       title=f"Temporal Autocorrelation — {RUN_NAME}", ylim=(0, 1.05))
+ax.set_xticks(lead_minutes)
+ax.legend()
+plt.tight_layout()
+plt.savefig(RUN_OUT_DIR / f"temporal_autocorr_{RUN_NAME}.png", dpi=150)
+print(f"Temporal autocorrelation plot saved to {RUN_OUT_DIR / f'temporal_autocorr_{RUN_NAME}.png'}")

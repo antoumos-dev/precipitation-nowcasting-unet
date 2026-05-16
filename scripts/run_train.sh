@@ -14,4 +14,4 @@ export PATH=$HOME/.conda/envs/pysteps/bin:$PATH
 nvidia-smi
 python -c "import torch; print('CUDA:', torch.cuda.is_available())"
 
-python nowcast_04_train_all.py
+python nowcast_04_train.py

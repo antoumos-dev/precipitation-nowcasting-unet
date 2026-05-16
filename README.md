@@ -1,17 +1,14 @@
 # Precipitation Nowcasting with U-Net
 
-Short-term precipitation forecasting with deep learning — 30-minute radar extrapolation for Switzerland, trained on MeteoSwiss radar composites
-
+Short-term precipitation forecasting with deep learning — 10/20/30-minute radar extrapolation for Switzerland, trained on MeteoSwiss radar composites.
 
 ---
 
 ## Problem
 
-Predicting where and how much it will rain 30 minutes ahead is a core challenge in operational meteorology. Classical optical-flow methods (e.g. pysteps) extrapolate current patterns but struggle with convective initiation and decay. This project trains a U-Net to learn the mapping directly from recent radar frames to a future frame.
+Predicting where and how much it will rain 10–30 minutes ahead is a core challenge in operational meteorology. Classical optical-flow methods (e.g. pysteps) extrapolate current patterns but struggle with convective initiation and decay. This project trains a U-Net to learn the mapping directly from recent radar frames to multiple future frames simultaneously.
 
-Convolutional architectures are well-suited for this task because radar composites are inherently spatial: precipitation patterns have local structure and translational regularity that convolutions can exploit efficiently. The U-Net in particular combines an encoder branch — which progressively reduces spatial resolution while increasing feature depth to capture large-scale patterns — with a decoder branch that restores spatial resolution using skip connections from the encoder. This allows the model to simultaneously reason about broad precipitation systems and fine-scale local structure, which is critical for accurate spatial placement of rain at short lead times.
-
-This is a single-step model; temporal consistency is future work
+Convolutional architectures are well-suited for this task because radar composites are inherently spatial: precipitation patterns have local structure and translational regularity that convolutions can exploit efficiently. The U-Net combines an encoder branch — which progressively reduces spatial resolution while increasing feature depth to capture large-scale patterns — with a decoder branch that restores spatial resolution using skip connections from the encoder.
 
 ---
 
@@ -19,14 +16,14 @@ This is a single-step model; temporal consistency is future work
 
 | Component | Choice |
 |---|---|
-| Architecture | U-Net (encoder–decoder with skip connections) |
+| Architecture | Multi-output U-Net — shared encoder, three parallel decoder branches (+10, +20, +30 min) |
 | Input | 3 radar frames (log1p-scaled reflectivity), 501×371 px |
-| Output | 1 predicted frame at +30 min |
+| Output | 3 predicted frames at +10, +20, +30 min |
 | Loss | Weighted L1 — upweights high-intensity pixels to counter class imbalance |
 | Optimizer | AdamW, lr=1e-4, weight decay=1e-4 |
 | Regularisation | BatchNorm + Dropout2d (0.1) + early stopping (patience=10) |
 
-The model is trained in log space to stabilize the heavy-tailed precipitation distribution, but weight the loss in physical space to ensure high-intensity events drive the gradients.
+The model is trained in log space to stabilize the heavy-tailed precipitation distribution, but weights the loss in physical space to ensure high-intensity events drive the gradients.
 
 The weighted loss is defined as:
 
@@ -35,6 +32,9 @@ L = mean( (1 + R) * |pred - target| )
 ```
 
 where pred and target are in log1p(mm/10min) space, and R = expm1(target) converts the target back to rain rate in mm/10min. This gives dry/light-rain pixels a baseline weight of 1, while progressively increasing the penalty for errors in heavier precipitation.
+
+### Temporal consistency (in progress)
+The three decoder branches are connected via cross-connections at 64×48 resolution: +10 min decoder features are injected into the +20 min decoder, and +20 min features into the +30 min decoder. This encourages the model to produce temporally coherent predictions at the mesoscale. Full evaluation via temporal autocorrelation diagnostics is ongoing.
 
 ---
 
