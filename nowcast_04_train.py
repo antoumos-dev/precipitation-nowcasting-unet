@@ -22,9 +22,9 @@ NUM_EPOCHS      = 50
 LR              = 1e-4
 NUM_WORKERS     = 4
 WEIGHT_EXPONENT  = 1    # >1 = more focus on heavy rain, <1 = less
-SPECTRAL_WEIGHT  = 0.1  # λ for spectral loss term
+SPECTRAL_WEIGHT  = 0.01  # λ for spectral loss term (tuned: balances L1 ~0.07 and LSD ~9.5 dB)
 DEVICE      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-RUN_NAME    = "unet2_gradient_l1"  # other choices: unet2_weighted_l1, unet2_spectral_l1
+RUN_NAME    = "unet2_lsd_ltw_rlrop"  # lsd + lead-time weighted + ReduceLROnPlateau
 
 print(f"Device:     {DEVICE}")
 print(f"Batch size: {BATCH_SIZE}")
@@ -205,22 +205,37 @@ def weighted_l1(pred, target):
     w = (1.0 + torch.expm1(target)) ** WEIGHT_EXPONENT
     return (w * torch.abs(pred - target)).mean()
 
+def lsd_loss(pred, target):
+    # cuFFT rejects these shapes on this driver — run FFT on CPU, return loss to device
+    pred_p   = F.pad(pred.contiguous(),   (0, 13, 0, 11)).cpu()  # 371→384, 501→512
+    target_p = F.pad(target.contiguous(), (0, 13, 0, 11)).cpu()
+    S_pred   = torch.abs(torch.fft.fft2(pred_p))   ** 2
+    S_target = torch.abs(torch.fft.fft2(target_p)) ** 2
+    log_ratio = 10.0 * torch.log10((S_target + 1e-8) / (S_pred + 1e-8))
+    return torch.sqrt((log_ratio ** 2).mean()).to(pred.device)
+
 def gradient_loss(pred, target):
-    # Penalise differences in spatial gradients — discourages blurry predictions
-    # without requiring FFT (more compatible across CUDA versions)
-    pred_dx  = pred[:, :, :, 1:]  - pred[:, :, :, :-1]
-    pred_dy  = pred[:, :, 1:, :]  - pred[:, :, :-1, :]
-    target_dx = target[:, :, :, 1:]  - target[:, :, :, :-1]
-    target_dy = target[:, :, 1:, :]  - target[:, :, :-1, :]
+    # Fallback if fft2 is also unsupported — same anti-blur effect, no FFT needed
+    pred_dx   = pred[:, :, :, 1:]   - pred[:, :, :, :-1]
+    pred_dy   = pred[:, :, 1:, :]   - pred[:, :, :-1, :]
+    target_dx = target[:, :, :, 1:] - target[:, :, :, :-1]
+    target_dy = target[:, :, 1:, :] - target[:, :, :-1, :]
     return F.l1_loss(pred_dx, target_dx) + F.l1_loss(pred_dy, target_dy)
 
+LEAD_WEIGHTS = torch.tensor([1.0, 2.0, 3.0]).view(1, 3, 1, 1)  # +10, +20, +30
+
 def combined_loss(pred, target):
-    return weighted_l1(pred, target) + SPECTRAL_WEIGHT * gradient_loss(pred, target)
+    w = LEAD_WEIGHTS.to(pred.device) * (1.0 + torch.expm1(target)) ** WEIGHT_EXPONENT
+    l1 = (w * torch.abs(pred - target)).mean()
+    return l1 + SPECTRAL_WEIGHT * lsd_loss(pred, target)
 
 LOSS_FN = combined_loss
 
 model     = MultiOutputUNet(features=[32, 64, 128, 256]).to(DEVICE)
 optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode="min", factor=0.5, patience=5, min_lr=1e-6
+)
 
 print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
@@ -285,6 +300,9 @@ for epoch in range(1, NUM_EPOCHS + 1):
     train_losses.append(train_loss)
     val_losses.append(val_loss)
 
+    scheduler.step(val_loss)
+    current_lr = optimizer.param_groups[0]["lr"]
+
     is_best = val_loss < best_val_loss
     if is_best:
         best_val_loss = val_loss
@@ -292,7 +310,7 @@ for epoch in range(1, NUM_EPOCHS + 1):
     else:
         epochs_no_improve += 1
 
-    print(f"{epoch:>6} {train_loss:>12.6f} {val_loss:>12.6f} {'*' if is_best else ''}")
+    print(f"{epoch:>6} {train_loss:>12.6f} {val_loss:>12.6f} {'*' if is_best else ''} lr={current_lr:.2e}")
 
     # --------------------------------------------------------
     # CHECKPOINTING

@@ -16,7 +16,7 @@ DATA_DIR  = _HERE / "radar_data"
 CKPT_DIR  = _HERE / "checkpoints"
 OUT_DIR   = _HERE / "test_output"
 
-RUN_NAME   = "unet2_weighted_l1"    # must match training run
+RUN_NAME   = "unet2_lsd_ltw_rlrop"    # must match training run
 BATCH_SIZE = 8
 DEVICE     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 PAD        = (6, 7, 5, 6)
