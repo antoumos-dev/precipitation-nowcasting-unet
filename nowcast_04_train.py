@@ -24,7 +24,7 @@ NUM_WORKERS     = 4
 WEIGHT_EXPONENT  = 1    # >1 = more focus on heavy rain, <1 = less
 SPECTRAL_WEIGHT  = 0.01  # λ for spectral loss term (tuned: balances L1 ~0.07 and LSD ~9.5 dB)
 DEVICE      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-RUN_NAME    = "unet2_lsd_ltw_rlrop"  # lsd + lead-time weighted + ReduceLROnPlateau
+RUN_NAME    = "unet2_lsd_ltw_rlrop"  # lsd + lead-time weighted + ReduceLROnPlateau + patience=15
 
 print(f"Device:     {DEVICE}")
 print(f"Batch size: {BATCH_SIZE}")
