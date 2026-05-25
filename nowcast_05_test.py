@@ -21,7 +21,7 @@ RUN_NAME     = "unet2_lsd_ltw_rlrop"    # must match training run
 BATCH_SIZE   = 8
 DEVICE       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 PAD          = (6, 7, 5, 6)
-PLOT_INDICES = [0, 288, 971, 1326]            # which test-set samples to visualise
+PLOT_INDICES = [1100]            # which test-set samples to visualise
 
 RUN_OUT_DIR = OUT_DIR / RUN_NAME
 RUN_OUT_DIR.mkdir(exist_ok=True, parents=True)
@@ -273,7 +273,7 @@ for plot_num, i in enumerate(PLOT_INDICES, start=1):
     for r, (row_data, row_label) in enumerate(zip([trues_mmh[i], preds_mmh[i]], ROW_LABEL)):
         for j, lead in enumerate(LEAD_NAMES):
             ax = axes[r, j]
-            im = ax.imshow(row_data[j], norm=norm_precip, cmap=cmap_precip, origin="upper")
+            im = ax.imshow(np.rot90(row_data[j]), norm=norm_precip, cmap=cmap_precip, origin="upper")
             ax.set_xticks([]); ax.set_yticks([])
             for spine in ax.spines.values():
                 spine.set_visible(False)

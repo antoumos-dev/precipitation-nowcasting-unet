@@ -50,7 +50,7 @@ Temporal autocorrelation diagnostics (spatial correlation of each predicted fram
     └── nowcast_03_train.ipynb           # initial prototype (single-GPU, small data)
 ├── nowcast_04_train.py          # full training script (SLURM)
 ├── nowcast_05_test.py               # inference + metrics on held-out test set
-├── radar_data/                          # raw radar data 
+├── data/                          # raw radar data 
 │   ├── training_samples_meta.csv        # event metadata
 │   └── training_samples_meta_enriched.csv  # metadata with train/val/test split
 ├── scripts/
@@ -96,7 +96,7 @@ conda activate nowprecip
 
 ### 2. Prepare data
 
-Download `training_data.npz` from the Zenodo repository (see **Data** section) and place it in `radar_data/` alongside the metadata files already included in this repo:
+Download `training_data.npz` from the Zenodo repository (see **Data** section) and place it in `data/` alongside the metadata files already included in this repo:
 - `training_data.npz` — input/output radar stacks (from Zenodo)
 - `training_samples_meta_enriched.csv` — metadata with `split` column (included)
 
@@ -140,8 +140,7 @@ Tested on:
 
 The processed radar composite dataset (`training_data.npz`) is publicly available on Zenodo:
 
-> **TODO: insert Zenodo DOI badge and link here**
-> [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.XXXXXXX.svg)](https://doi.org/10.5281/zenodo.XXXXXXX)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20385063.svg)](https://doi.org/10.5281/zenodo.20385063)
 
 Source: MeteoSwiss radar composite data, processed for short-term precipitation nowcasting over Switzerland (2020–2023).
 
