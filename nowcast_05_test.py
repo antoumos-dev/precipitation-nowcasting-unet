@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 from pathlib import Path
 import matplotlib.pyplot as plt
+from matplotlib.colors import BoundaryNorm, ListedColormap
 from scipy.ndimage import uniform_filter
 
 # ============================================================
@@ -16,10 +17,11 @@ DATA_DIR  = _HERE / "radar_data"
 CKPT_DIR  = _HERE / "checkpoints"
 OUT_DIR   = _HERE / "test_output"
 
-RUN_NAME   = "unet2_lsd_ltw_rlrop"    # must match training run
-BATCH_SIZE = 8
-DEVICE     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-PAD        = (6, 7, 5, 6)
+RUN_NAME     = "unet2_lsd_ltw_rlrop"    # must match training run
+BATCH_SIZE   = 8
+DEVICE       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+PAD          = (6, 7, 5, 6)
+PLOT_INDICES = [0, 288, 971, 1326]            # which test-set samples to visualise
 
 RUN_OUT_DIR = OUT_DIR / RUN_NAME
 RUN_OUT_DIR.mkdir(exist_ok=True, parents=True)
@@ -114,6 +116,9 @@ meta      = pd.read_csv(DATA_DIR / "training_samples_meta_enriched.csv")
 test_mask = meta["split"] == "test"
 X_test    = X_all[test_mask]
 Y_test    = Y_all[test_mask]
+meta_test = meta[test_mask].reset_index(drop=True)
+meta_test[["t0_datetime", "event_id", "mean_intensity", "max_intensity", "wet_fraction"]]\
+    .rename_axis("idx").to_csv(OUT_DIR / "test_index_lookup.csv")
 print(f"Test samples: {len(X_test)}")
 
 # Pad inputs
@@ -230,25 +235,69 @@ for j, lead in enumerate(LEAD_NAMES):
 pd.DataFrame(rows).to_csv(RUN_OUT_DIR / f"metrics_{RUN_NAME}.csv", index=False)
 
 # ============================================================
-# PLOT: first 4 test cases, all 3 lead times
+# PRECIPITATION COLORMAP (radar-style: white → blue → green → yellow → red)
 # ============================================================
-n_plot = min(4, len(preds_mmh))
-vmax   = np.percentile(trues_mmh[:n_plot], 99)
+from matplotlib.colors import BoundaryNorm, ListedColormap
 
-fig, axes = plt.subplots(n_plot * 3, 2, figsize=(8, 3 * n_plot * 3), squeeze=False)
-for i in range(n_plot):
-    for j, lead in enumerate(LEAD_NAMES):
-        row = i * 3 + j
-        axes[row, 0].imshow(trues_mmh[i, j], vmin=0, vmax=vmax, cmap="Blues")
-        axes[row, 0].set_title(f"Observed [{i}] {lead}")
-        axes[row, 0].axis("off")
-        axes[row, 1].imshow(preds_mmh[i, j], vmin=0, vmax=vmax, cmap="Blues")
-        axes[row, 1].set_title(f"Predicted [{i}] {lead}")
-        axes[row, 1].axis("off")
+PRECIP_LEVELS = [0.1, 0.2, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 7.0, 10.0]
+PRECIP_COLORS = [
+    "#c8f0ff",  # 0.1  very light blue
+    "#7ec8f5",  # 0.2  light blue
+    "#3399cc",  # 0.5  blue
+    "#00cc66",  # 1.0  green
+    "#66cc00",  # 2.0  lime
+    "#ffdd00",  # 3.0  yellow
+    "#ff9900",  # 4.0  orange
+    "#ff4400",  # 5.0  red-orange
+    "#cc0000",  # 7.0  red
+    "#800000",  # 10.0 dark red (extend="max" covers >10)
+]
+cmap_precip = ListedColormap(["#ffffff"] + PRECIP_COLORS)
+norm_precip = BoundaryNorm([0.0] + PRECIP_LEVELS + [100.0], cmap_precip.N)
 
-plt.tight_layout()
-plt.savefig(RUN_OUT_DIR / f"test_cases_{RUN_NAME}.png", dpi=150)
-print(f"\nPlot saved to {RUN_OUT_DIR / f'test_cases_{RUN_NAME}.png'}")
+# ============================================================
+# PLOT: selected events (2 rows × 3 lead-time columns, one file each)
+# ============================================================
+ROW_LABEL = ["Observation", "U-Net"]
+
+for plot_num, i in enumerate(PLOT_INDICES, start=1):
+    ts      = pd.Timestamp(meta_test.loc[i, "t0_datetime"])
+    ts_str  = ts.strftime("%Y%m%d_%H%M")
+    ts_nice = ts.strftime("%Y-%m-%d %H:%M UTC")
+
+    fig, axes = plt.subplots(
+        2, 3, figsize=(13, 7),
+        gridspec_kw={"wspace": 0.04, "hspace": 0.10},
+    )
+
+    for r, (row_data, row_label) in enumerate(zip([trues_mmh[i], preds_mmh[i]], ROW_LABEL)):
+        for j, lead in enumerate(LEAD_NAMES):
+            ax = axes[r, j]
+            im = ax.imshow(row_data[j], norm=norm_precip, cmap=cmap_precip, origin="upper")
+            ax.set_xticks([]); ax.set_yticks([])
+            for spine in ax.spines.values():
+                spine.set_visible(False)
+            if r == 0:
+                ax.set_title(lead, fontsize=12, pad=6)
+        axes[r, 0].text(
+            -0.06, 0.5, row_label,
+            transform=axes[r, 0].transAxes,
+            va="center", ha="right", fontsize=12, fontweight="bold", rotation=90,
+        )
+
+    cbar = fig.colorbar(
+        im, ax=axes.ravel().tolist(),
+        orientation="vertical", pad=0.02, shrink=0.85, extend="max",
+    )
+    cbar.set_label("mm / 10 min", fontsize=11)
+    cbar.set_ticks(PRECIP_LEVELS)
+    cbar.ax.tick_params(labelsize=9)
+
+    fig.suptitle(f"Event {plot_num}  |  {ts_nice}  —  {RUN_NAME}", fontsize=12, y=1.01)
+    out_path = RUN_OUT_DIR / f"event_{plot_num:02d}_{ts_str}_{RUN_NAME}.png"
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved {out_path}")
 
 
 

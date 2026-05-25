@@ -50,7 +50,7 @@ Temporal autocorrelation diagnostics (spatial correlation of each predicted fram
     └── nowcast_03_train.ipynb           # initial prototype (single-GPU, small data)
 ├── nowcast_04_train.py          # full training script (SLURM)
 ├── nowcast_05_test.py               # inference + metrics on held-out test set
-├── radar_data/                          # raw radar data (not tracked — MeteoSwiss, not public)
+├── radar_data/                          # raw radar data 
 │   ├── training_samples_meta.csv        # event metadata
 │   └── training_samples_meta_enriched.csv  # metadata with train/val/test split
 ├── scripts/
@@ -96,11 +96,11 @@ conda activate nowprecip
 
 ### 2. Prepare data
 
-Place the following files in `radar_data/`:
-- `training_data.npz` — input/output radar stacks
-- `training_samples_meta_enriched.csv` — metadata with `split` column
+Download `training_data.npz` from the Zenodo repository (see **Data** section) and place it in `radar_data/` alongside the metadata files already included in this repo:
+- `training_data.npz` — input/output radar stacks (from Zenodo)
+- `training_samples_meta_enriched.csv` — metadata with `split` column (included)
 
-See `nowcast_01_preprocessing.ipynb` and `nowcast_02_enrich_split.ipynb` for how these are generated.
+See `nowcast_01_preprocessing.ipynb` and `nowcast_02_enrich_split.ipynb` for how the npz was generated from raw MeteoSwiss data.
 
 ### 3. Train
 
@@ -138,6 +138,11 @@ Tested on:
 
 ## Data
 
-MeteoSwiss radar composite data (`training_data.npz`). Not publicly available — contact MeteoSwiss for access.
+The processed radar composite dataset (`training_data.npz`) is publicly available on Zenodo:
 
-The event metadata and train/val/test split (`training_samples_meta.csv`, `training_samples_meta_enriched.csv`) are included in this repository to allow full reproducibility of the split for anyone with access to the raw data.
+> **TODO: insert Zenodo DOI badge and link here**
+> [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.XXXXXXX.svg)](https://doi.org/10.5281/zenodo.XXXXXXX)
+
+Source: MeteoSwiss radar composite data, processed for short-term precipitation nowcasting over Switzerland (2020–2023).
+
+The event metadata and train/val/test split (`training_samples_meta.csv`, `training_samples_meta_enriched.csv`) are included in this repository to allow full reproducibility of the split.
