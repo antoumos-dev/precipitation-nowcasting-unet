@@ -83,6 +83,18 @@ Evaluation on held-out test set (+30 min lead). Current configuration: **lead-ti
 
 Results show improvement over the previous single-output baseline: RMSE reduced from 0.33 → 0.30, and FSS at high intensity/large scale improved (FSS @ 1.0mm, 32px: 0.47 → 0.49). The model still loses to persistence at large spatial scales and high thresholds (FSS @ 0.5mm and 1.0mm, 32px), consistent with spatial displacement errors in heavy precipitation cells at longer lead times.
 
+### Example forecasts
+
+**Winter stratiform event — 2022-11-18 01:20 UTC**
+
+![Winter event forecast](figures/event_01_20221118_0120_unet2_lsd_ltw_rlrop.png)
+
+**Summer convective event — 2023-08-25 22:30 UTC**
+
+![Summer event forecast](figures/event_03_20230825_2230_unet2_lsd_ltw_rlrop.png)
+
+*Each panel shows Observation (top) vs U-Net prediction (bottom) at +10, +20, +30 min lead times. Colour scale in mm/10 min.*
+
 ---
 
 ## Quickstart
