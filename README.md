@@ -157,3 +157,10 @@ The processed radar composite dataset (`training_data.npz`) is publicly availabl
 Source: MeteoSwiss radar composite data, processed for short-term precipitation nowcasting over Switzerland (2020–2023).
 
 The event metadata and train/val/test split (`training_samples_meta.csv`, `training_samples_meta_enriched.csv`) are included in this repository to allow full reproducibility of the split.
+
+## Pretrained model
+
+The best model checkpoint (`best_model_unet2_lsd_ltw_rlrop.pt`) is available on Zenodo:
+
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20385769.svg)](https://doi.org/10.5281/zenodo.20385769)
+
